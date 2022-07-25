@@ -2,37 +2,51 @@
   (:require [io.pedestal.http :as http]
             [io.pedestal.http.route :as route]
             [io.pedestal.http.body-params :as body-params]
-            [ring.util.response :as ring-resp]))
+            [ring.util.response :as ring-resp]
+            [taoensso.carmine :as redis])
+  (:import
+   org.apache.commons.validator.routines.UrlValidator))
 
-(defn about-page
-  [request]
-  (ring-resp/response (format "Clojure %s - served from %s"
-                              (clojure-version)
-                              (route/url-for ::about-page))))
+(def counter (atom 10000000))
+
+(def validator (UrlValidator. (into-array ["http" "https"])))
+
+(def redis-conn {:pool {} :spec {:uri "redis://127.0.0.1:6379"}})
+
+(defmacro wcar* [& body] `(redis/wcar redis-conn ~@body))
+
+(defn create-short-url [path]
+  (let [rand-str (inc @counter)]
+    (swap! counter inc)
+    (wcar* nil
+                (redis/set (str "/" rand-str) path))
+    (str "http://localhost:8080/" rand-str)))
+
+(defn handle-create [{:keys [json-params]}]
+  (if (.isValid validator (str (:url json-params))) ; Drop '/'
+    {:status 200 :body (create-short-url (:url json-params))}
+    {:status 401 :body "Invalid Url provided"}))
+
+(defn handle-redirect [{path :uri :as request}]
+  (let [url (wcar* nil (redis/get path))]
+    (if url
+      {:status 302 :body "" :headers {"Location" url}}
+      {:status 404 :body "Unknown destination."})))
+
+
 
 (defn home-page
   [request]
-  (ring-resp/response "Hello World!"))
+  (ring-resp/response "A short url API!"))
 
-;; Defines "/" and "/about" routes with their associated :get handlers.
-;; The interceptors defined after the verb map (e.g., {:get home-page}
-;; apply to / and its children (/about).
-(def common-interceptors [(body-params/body-params) http/html-body])
-
-;; Tabular routes
-(def routes #{["/" :get (conj common-interceptors `home-page)]
-              ["/about" :get (conj common-interceptors `about-page)]})
-
-;; Map-based routes
-;(def routes `{"/" {:interceptors [(body-params/body-params) http/html-body]
-;                   :get home-page
-;                   "/about" {:get about-page}}})
 
 ;; Terse/Vector-based routes
-;(def routes
-;  `[[["/" {:get home-page}
-;      ^:interceptors [(body-params/body-params) http/html-body]
-;      ["/about" {:get about-page}]]]])
+(def routes
+  `[[["/" {:get home-page
+           :post handle-create}
+      ^:interceptors [(body-params/body-params) http/json-body]
+      ["/:id" {:get handle-redirect}
+       ^:interceptors [(body-params/body-params)]]]]])
 
 
 ;; Consumed by url-short.server/create-server
